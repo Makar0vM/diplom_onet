@@ -1,0 +1,204 @@
+:root {
+  --bg: #eef3fa;
+  --surface: #ffffff;
+  --primary: #0d47a1;
+  --primary-hover: #1565c0;
+  --primary-soft: #e3f2fd;
+  --text: #102a43;
+  --muted: #5c6b7a;
+  --border: #c5d4eb;
+  --success: #1b5e20;
+  --danger: #b71c1c;
+  --radius: 12px;
+  --shadow: 0 8px 30px rgba(13, 71, 161, 0.08);
+  --shadow-lg: 0 20px 50px rgba(13, 71, 161, 0.12);
+  --font-sans: "Onest", "Segoe UI", system-ui, -apple-system, sans-serif;
+  /* Типографика: чуть крупнее база, ровная шкала */
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+  --text-base: clamp(1rem, 0.18vw + 0.96rem, 1.0625rem);
+  --text-md: 1.0625rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: clamp(1.2rem, 1.4vw + 0.85rem, 1.45rem);
+  --text-3xl: clamp(1.45rem, 2.2vw + 0.75rem, 1.85rem);
+  --text-hero: clamp(1.65rem, 3.2vw + 0.55rem, 2.35rem);
+  --leading-tight: 1.2;
+  --leading-snug: 1.38;
+  --leading-normal: 1.55;
+  --leading-relaxed: 1.65;
+  --tracking-tight: -0.02em;
+  --tracking-ui: 0.01em;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 0.18s;
+  --dur-med: 0.42s;
+  --dur-slow: 0.85s;
+  font-family: var(--font-sans);
+  font-weight: 400;
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0.01ms;
+    --dur-med: 0.01ms;
+    --dur-slow: 0.01ms;
+  }
+}
+
+@keyframes page-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes home-rise {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes header-shimmer {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: translateX(-8%) scale(1);
+  }
+  50% {
+    opacity: 0.65;
+    transform: translateX(8%) scale(1.02);
+  }
+}
+
+@keyframes hero-glow {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1) translate(0, 0);
+  }
+  50% {
+    opacity: 0.92;
+    transform: scale(1.03) translate(2%, -1%);
+  }
+}
+
+.page-view {
+  animation: page-rise var(--dur-med) var(--ease-out) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-view {
+    animation: none;
+  }
+}
+
+.home-page > * {
+  animation: home-rise 0.55s var(--ease-out) both;
+}
+
+.home-page > *:nth-child(1) {
+  animation-delay: 0.03s;
+}
+.home-page > *:nth-child(2) {
+  animation-delay: 0.08s;
+}
+.home-page > *:nth-child(3) {
+  animation-delay: 0.13s;
+}
+.home-page > *:nth-child(4) {
+  animation-delay: 0.18s;
+}
+.home-page > *:nth-child(5) {
+  animation-delay: 0.22s;
+}
+.home-page > *:nth-child(6) {
+  animation-delay: 0.26s;
+}
+.home-page > *:nth-child(7) {
+  animation-delay: 0.3s;
+}
+.home-page > *:nth-child(8) {
+  animation-delay: 0.34s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-page > * {
+    animation: none;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+::selection {
+  background: rgba(25, 118, 210, 0.22);
+  color: var(--text);
+}
+
+a {
+  color: var(--primary);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  transition: color var(--dur-fast) var(--ease-soft), text-decoration-color var(--dur-fast) var(--ease-soft);
+}
+
+a:hover {
+  color: var(--primary-hover);
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  transition: border-color var(--dur-fast) var(--ease-soft), box-shadow var(--dur-fast) var(--ease-soft);
+}

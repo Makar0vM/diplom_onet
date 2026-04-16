@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+pydantic
+sqlalchemy
+psycopg2-binary
+scikit-learn
+xgboost
+pandas
+joblib
+python-multipart
+pytesseract
+pillow
+jinja2
+pdfkit
+python-jose
