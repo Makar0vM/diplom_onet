@@ -4,7 +4,23 @@ async function extractErrorText(res, fallback = "Ошибка запроса") {
   try {
     const data = await res.json();
     const msg = data?.detail;
-    if (typeof msg === "string" && msg.trim()) return msg;
+    if (typeof msg === "string" && msg.trim()) {
+      if (msg === "Email already registered") return "Этот email уже зарегистрирован";
+      return msg;
+    }
+    if (Array.isArray(msg)) {
+      const parts = msg
+        .map((item) => {
+          if (typeof item === "string") return item;
+          if (item?.msg) {
+            const loc = Array.isArray(item.loc) ? item.loc.filter((x) => x !== "body").join(".") : "";
+            return loc ? `${loc}: ${item.msg}` : item.msg;
+          }
+          return null;
+        })
+        .filter(Boolean);
+      if (parts.length) return parts.join("; ");
+    }
     if (msg) return JSON.stringify(msg);
   } catch {
     /* empty */
@@ -58,20 +74,38 @@ export function buildQuery(params) {
   return s ? `?${s}` : "";
 }
 
-export async function downloadApplicationsExport(params) {
-  const q = buildQuery(params);
+export async function downloadBlob(path, filename, fallbackError = "Не удалось сформировать файл") {
+  const q = buildQuery(path.params || {});
+  const base = typeof path === "string" ? path : path.url;
   const t = getToken();
   const headers = {};
   if (t) headers.Authorization = `Bearer ${t}`;
-  const res = await fetch(`${API}/applications/export${q}`, { headers });
+  const res = await fetch(`${API}${base}${q}`, { headers });
   if (!res.ok) {
-    throw new Error(await extractErrorText(res, "Не удалось сформировать файл"));
+    throw new Error(await extractErrorText(res, fallbackError));
   }
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "applications_export.csv";
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+export async function downloadAnalyticsReport(params) {
+  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  await downloadBlob(
+    { url: "/analytics/report.pdf", params },
+    `grifind_analytics_${stamp}.pdf`,
+    "Не удалось сформировать PDF-отчёт",
+  );
+}
+
+export async function downloadApplicationsExport(params) {
+  await downloadBlob(
+    { url: "/applications/export", params },
+    "applications_export.csv",
+    "Не удалось сформировать файл",
+  );
 }

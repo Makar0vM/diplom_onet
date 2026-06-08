@@ -1,7 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
-import { api, buildQuery, downloadApplicationsExport, getRole, getToken, setAuth } from "./api.js";
+import {
+  api,
+  buildQuery,
+  downloadAnalyticsReport,
+  downloadApplicationsExport,
+  getRole,
+  getToken,
+  setAuth,
+} from "./api.js";
 import { COMPANY } from "./company.js";
+import {
+  firstErrorMessage,
+  hasErrors,
+  validateLoanForm,
+  validateLoanWizardStep,
+  validateLoginForm,
+  validateRegisterForm,
+} from "./validation.js";
+
 
 const PREFILL_KEY = "gf_prefill";
 
@@ -21,6 +38,24 @@ const initialForm = {
 };
 
 const STATUS_OPTIONS = ["На рассмотрении", "Одобрено", "Отказано", "На доработке"];
+
+function FormField({ label, htmlFor, error, children, className = "" }) {
+  return (
+    <div className={className}>
+      <label htmlFor={htmlFor}>{label}</label>
+      {children}
+      {error ? (
+        <p className="field-error" id={`${htmlFor}-error`} role="alert">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function fieldInputClass(error) {
+  return error ? "input-invalid" : undefined;
+}
 
 function ToastHost({ toast, onDismiss }) {
   useEffect(() => {
@@ -108,6 +143,8 @@ export default function App() {
   const [view, setView] = useState("home");
   const [, tick] = useState(0);
   const [toast, setToast] = useState(null);
+  const [cabinetFocus, setCabinetFocus] = useState(null);
+  const [adminFocus, setAdminFocus] = useState(null);
   const token = getToken();
   const role = getRole();
 
@@ -134,6 +171,15 @@ export default function App() {
         token={token}
         role={role}
         onLogout={logout}
+        onOpenApplicationChat={(applicationId) => {
+          if (role === "admin") {
+            setAdminFocus({ applicationId, chatOnly: true });
+            setView("admin");
+          } else {
+            setCabinetFocus({ applicationId, chatOnly: true });
+            setView("cabinet");
+          }
+        }}
       />
 
       <main className="page-main">
@@ -170,8 +216,22 @@ export default function App() {
               }}
             />
           )}
-          {view === "cabinet" && <Cabinet setView={setView} />}
-          {view === "admin" && role === "admin" && <AdminPanel />}
+          {view === "cabinet" && (
+            <Cabinet
+              setView={setView}
+              focus={cabinetFocus}
+              onFocusConsumed={() => setCabinetFocus(null)}
+            />
+          )}
+          {view === "admin" && role === "admin" && (
+            <AdminPanel focus={adminFocus} onFocusConsumed={() => setAdminFocus(null)} />
+          )}
+          {view === "analytics" && role === "admin" && <AdminAnalytics />}
+          {view === "analytics" && role !== "admin" && (
+            <div className="panel">
+              <p className="muted">Раздел доступен только сотрудникам компании.</p>
+            </div>
+          )}
           {view === "admin" && role !== "admin" && (
             <div className="panel">
               <p className="muted">Раздел доступен только сотрудникам компании.</p>
@@ -187,8 +247,36 @@ export default function App() {
   );
 }
 
-function SiteHeader({ view, setView, token, role, onLogout }) {
+function SiteHeader({ view, setView, token, role, onLogout, onOpenApplicationChat }) {
   const [navOpen, setNavOpen] = useState(false);
+  const [notifyOpen, setNotifyOpen] = useState(false);
+  const [notifyItems, setNotifyItems] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  const loadNotifications = useCallback(async () => {
+    if (!token) {
+      setUnreadCount(0);
+      setNotifyItems([]);
+      return;
+    }
+    try {
+      const [cnt, list] = await Promise.all([
+        api("/notifications/unread-count"),
+        api("/notifications"),
+      ]);
+      setUnreadCount(cnt.count || 0);
+      setNotifyItems(list.items || []);
+    } catch {
+      /* ignore */
+    }
+  }, [token]);
+
+  useEffect(() => {
+    loadNotifications();
+    if (!token) return undefined;
+    const t = setInterval(loadNotifications, 8000);
+    return () => clearInterval(t);
+  }, [loadNotifications, token]);
 
   const go = (v) => {
     setView(v);
@@ -247,13 +335,56 @@ function SiteHeader({ view, setView, token, role, onLogout }) {
               <span className={`badge${role === "admin" ? " admin" : ""}`}>
                 {role === "admin" ? "Сотрудник" : "Клиент"}
               </span>
-              <button type="button" className="btn btn-primary" onClick={() => go("cabinet")}>
-                Личный кабинет
-              </button>
-              {role === "admin" && (
-                <button type="button" className="btn btn-ghost" onClick={() => go("admin")}>
-                  Заявки
+              <div className="notify-wrap">
+                <button
+                  type="button"
+                  className="btn btn-ghost notify-bell"
+                  aria-label="Уведомления"
+                  onClick={() => {
+                    setNotifyOpen((o) => !o);
+                    loadNotifications();
+                  }}
+                >
+                  Уведомления
+                  {unreadCount > 0 ? <span className="notify-badge">{unreadCount}</span> : null}
                 </button>
+                {notifyOpen ? (
+                  <div className="notify-dropdown" role="menu">
+                    {notifyItems.length === 0 ? (
+                      <p className="muted notify-empty">Нет уведомлений</p>
+                    ) : (
+                      notifyItems.map((n) => (
+                        <button
+                          key={n.id}
+                          type="button"
+                          className={`notify-item${n.is_read ? "" : " notify-item-unread"}`}
+                          onClick={() => {
+                            setNotifyOpen(false);
+                            onOpenApplicationChat(n.application_id);
+                          }}
+                        >
+                          <strong>{n.title}</strong>
+                          <span>{n.body}</span>
+                          <time>{formatDt(n.created_at)}</time>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                ) : null}
+              </div>
+              {role !== "admin" ? (
+                <button type="button" className="btn btn-primary" onClick={() => go("cabinet")}>
+                  Личный кабинет
+                </button>
+              ) : (
+                <>
+                  <button type="button" className="btn btn-primary" onClick={() => go("admin")}>
+                    Заявки
+                  </button>
+                  <button type="button" className="btn btn-ghost" onClick={() => go("analytics")}>
+                    Аналитика
+                  </button>
+                </>
               )}
               <button type="button" className="btn btn-ghost" onClick={onLogout}>
                 Выход
@@ -609,12 +740,28 @@ function ScoringPage({ setView }) {
   const [form, setForm] = useState(() => formFromPrefill(null));
   const [preview, setPreview] = useState(null);
   const [err, setErr] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({});
   const [loading, setLoading] = useState(false);
 
-  const f = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const f = (k) => (e) => {
+    setForm({ ...form, [k]: e.target.value });
+    if (fieldErrors[k]) {
+      setFieldErrors((prev) => {
+        const next = { ...prev };
+        delete next[k];
+        return next;
+      });
+    }
+  };
 
   const run = async (e) => {
     e.preventDefault();
+    const errors = validateLoanForm(form);
+    setFieldErrors(errors);
+    if (hasErrors(errors)) {
+      setErr(firstErrorMessage(errors));
+      return;
+    }
     setErr("");
     setPreview(null);
     setLoading(true);
@@ -652,61 +799,123 @@ function ScoringPage({ setView }) {
 
         {err && <div className="alert alert-error">{err}</div>}
 
-        <form onSubmit={run} className="form-grid cols-2" style={{ marginTop: "1rem" }}>
-        <div>
-          <label>ИНН организации</label>
-          <input value={form.inn} onChange={f("inn")} required placeholder="10 или 12 цифр" />
-        </div>
-        <div>
-          <label>Наименование</label>
-          <input value={form.company_name} onChange={f("company_name")} required />
-        </div>
-        <div style={{ gridColumn: "1 / -1" }}>
-          <label>Контактное лицо</label>
-          <input value={form.contact_name} onChange={f("contact_name")} />
-        </div>
-        <div style={{ gridColumn: "1 / -1" }}>
-          <label>Адрес объекта залога</label>
-          <input value={form.address} onChange={f("address")} required />
-        </div>
-        <div>
-          <label>Площадь, м²</label>
-          <input type="number" min={1} value={form.area} onChange={f("area")} required />
-        </div>
-        <div>
-          <label>Тип объекта</label>
-          <select value={form.property_type} onChange={f("property_type")}>
+        <form onSubmit={run} className="form-grid cols-2" style={{ marginTop: "1rem" }} noValidate>
+        <FormField label="ИНН организации" htmlFor="scoring-inn" error={fieldErrors.inn}>
+          <input
+            id="scoring-inn"
+            value={form.inn}
+            onChange={f("inn")}
+            placeholder="10 или 12 цифр"
+            className={fieldInputClass(fieldErrors.inn)}
+            inputMode="numeric"
+          />
+        </FormField>
+        <FormField label="Наименование" htmlFor="scoring-company" error={fieldErrors.company_name}>
+          <input
+            id="scoring-company"
+            value={form.company_name}
+            onChange={f("company_name")}
+            className={fieldInputClass(fieldErrors.company_name)}
+          />
+        </FormField>
+        <FormField
+          label="Контактное лицо"
+          htmlFor="scoring-contact"
+          error={fieldErrors.contact_name}
+          className="span-2"
+        >
+          <input id="scoring-contact" value={form.contact_name} onChange={f("contact_name")} />
+        </FormField>
+        <FormField label="Адрес объекта залога" htmlFor="scoring-address" error={fieldErrors.address} className="span-2">
+          <input
+            id="scoring-address"
+            value={form.address}
+            onChange={f("address")}
+            className={fieldInputClass(fieldErrors.address)}
+          />
+        </FormField>
+        <FormField label="Площадь, м²" htmlFor="scoring-area" error={fieldErrors.area}>
+          <input
+            id="scoring-area"
+            type="number"
+            min={1}
+            max={500000}
+            value={form.area}
+            onChange={f("area")}
+            className={fieldInputClass(fieldErrors.area)}
+          />
+        </FormField>
+        <FormField label="Тип объекта" htmlFor="scoring-type" error={null}>
+          <select id="scoring-type" value={form.property_type} onChange={f("property_type")}>
             <option>офис</option>
             <option>склад</option>
             <option>торговое</option>
             <option>производство</option>
             <option>другое</option>
           </select>
-        </div>
-        <div>
-          <label>Кадастровый номер</label>
-          <input value={form.cadastral_number} onChange={f("cadastral_number")} />
-        </div>
-        <div>
-          <label>Год постройки</label>
-          <input type="number" value={form.year_built} onChange={f("year_built")} />
-        </div>
-        <div>
-          <label>Сумма займа, ₽</label>
-          <input type="number" min={1} step="1000" value={form.requested_amount} onChange={f("requested_amount")} required />
-        </div>
-        <div>
-          <label>Срок, мес.</label>
-          <input type="number" min={1} max={360} value={form.term_months} onChange={f("term_months")} />
-        </div>
-        <div>
-          <label>Годовая выручка, ₽</label>
-          <input type="number" min={0} value={form.annual_revenue} onChange={f("annual_revenue")} />
-        </div>
-        <div>
-          <label>Задолженность, ₽</label>
-          <input type="number" min={0} value={form.total_debt} onChange={f("total_debt")} />
-        </div>
+        </FormField>
+        <FormField label="Кадастровый номер" htmlFor="scoring-cadastral" error={fieldErrors.cadastral_number}>
+          <input
+            id="scoring-cadastral"
+            value={form.cadastral_number}
+            onChange={f("cadastral_number")}
+            placeholder="56:29:1234567:89"
+            className={fieldInputClass(fieldErrors.cadastral_number)}
+          />
+        </FormField>
+        <FormField label="Год постройки" htmlFor="scoring-year" error={fieldErrors.year_built}>
+          <input
+            id="scoring-year"
+            type="number"
+            min={1800}
+            max={2030}
+            value={form.year_built}
+            onChange={f("year_built")}
+            className={fieldInputClass(fieldErrors.year_built)}
+          />
+        </FormField>
+        <FormField label="Сумма займа, ₽" htmlFor="scoring-amount" error={fieldErrors.requested_amount}>
+          <input
+            id="scoring-amount"
+            type="number"
+            min={1}
+            step="1000"
+            value={form.requested_amount}
+            onChange={f("requested_amount")}
+            className={fieldInputClass(fieldErrors.requested_amount)}
+          />
+        </FormField>
+        <FormField label="Срок, мес." htmlFor="scoring-term" error={fieldErrors.term_months}>
+          <input
+            id="scoring-term"
+            type="number"
+            min={1}
+            max={360}
+            value={form.term_months}
+            onChange={f("term_months")}
+            className={fieldInputClass(fieldErrors.term_months)}
+          />
+        </FormField>
+        <FormField label="Годовая выручка, ₽" htmlFor="scoring-revenue" error={fieldErrors.annual_revenue}>
+          <input
+            id="scoring-revenue"
+            type="number"
+            min={0}
+            value={form.annual_revenue}
+            onChange={f("annual_revenue")}
+            className={fieldInputClass(fieldErrors.annual_revenue)}
+          />
+        </FormField>
+        <FormField label="Задолженность, ₽" htmlFor="scoring-debt" error={fieldErrors.total_debt}>
+          <input
+            id="scoring-debt"
+            type="number"
+            min={0}
+            value={form.total_debt}
+            onChange={f("total_debt")}
+            className={fieldInputClass(fieldErrors.total_debt)}
+          />
+        </FormField>
         <div className="row-actions" style={{ gridColumn: "1 / -1", marginTop: 0 }}>
           <button type="submit" className="btn btn-solid" disabled={loading}>
             {loading ? "Считаем…" : "Получить оценку"}
@@ -718,12 +927,23 @@ function ScoringPage({ setView }) {
         <>
           <div className="result-grid">
             <div className="result-card">
-              <div className="label">Оценка залога</div>
+              <div className="label">Залоговая стоимость</div>
               <div className="value">{preview.valuation_estimate?.toLocaleString("ru-RU")} ₽</div>
             </div>
+            {preview.market_value_estimate != null && (
+              <div className="result-card">
+                <div className="label">Рыночная оценка</div>
+                <div className="value">{preview.market_value_estimate.toLocaleString("ru-RU")} ₽</div>
+              </div>
+            )}
             <div className="result-card">
               <div className="label">Индикатор риска</div>
               <div className="value">{(preview.default_probability * 100).toFixed(1)} %</div>
+              {preview.risk_level ? (
+                <div className="muted" style={{ fontSize: "0.85rem", marginTop: "0.25rem" }}>
+                  уровень: {preview.risk_level}
+                </div>
+              ) : null}
             </div>
             <div className="result-card">
               <div className="label">Ориентир по ставке</div>
@@ -736,6 +956,11 @@ function ScoringPage({ setView }) {
               </div>
             </div>
           </div>
+          {preview.valuation_note && (
+            <div className="result-note muted" style={{ marginTop: "0.75rem" }}>
+              {preview.valuation_note}
+            </div>
+          )}
           <div className="result-note">
             Итог: {preview.approved_hint ? "параметры выглядят благоприятно для дальнейшего рассмотрения." : "рекомендуем уточнить данные со специалистом — возможны дополнительные условия."}
           </div>
@@ -764,9 +989,16 @@ function ScoringPage({ setView }) {
 function AuthLogin({ onSuccess, showToast }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({});
 
   const submit = async (e) => {
     e.preventDefault();
+    const errors = validateLoginForm({ email, password });
+    setFieldErrors(errors);
+    if (hasErrors(errors)) {
+      showToast(firstErrorMessage(errors), "error");
+      return;
+    }
     try {
       const data = await api("/auth/login", {
         method: "POST",
@@ -782,27 +1014,33 @@ function AuthLogin({ onSuccess, showToast }) {
   return (
     <div className="panel panel-deco auth-panel">
       <h2>Вход в личный кабинет</h2>
-      <form onSubmit={submit} className="form-grid">
-        <div>
-          <label htmlFor="login-email">Электронная почта</label>
+      <form onSubmit={submit} className="form-grid" noValidate>
+        <FormField label="Логин или email" htmlFor="login-email" error={fieldErrors.email}>
           <input
             id="login-email"
-            type="email"
+            type="text"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
+            autoComplete="username"
+            onChange={(e) => {
+              setEmail(e.target.value);
+              if (fieldErrors.email) setFieldErrors((prev) => ({ ...prev, email: undefined }));
+            }}
+            className={fieldInputClass(fieldErrors.email)}
           />
-        </div>
-        <div>
-          <label htmlFor="login-pass">Пароль</label>
+        </FormField>
+        <FormField label="Пароль" htmlFor="login-pass" error={fieldErrors.password}>
           <input
             id="login-pass"
             type="password"
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
+            onChange={(e) => {
+              setPassword(e.target.value);
+              if (fieldErrors.password) setFieldErrors((prev) => ({ ...prev, password: undefined }));
+            }}
+            className={fieldInputClass(fieldErrors.password)}
+            autoComplete="current-password"
           />
-        </div>
+        </FormField>
         <button type="submit" className="btn btn-solid">
           Войти
         </button>
@@ -810,7 +1048,6 @@ function AuthLogin({ onSuccess, showToast }) {
     </div>
   );
 }
-
 function AuthRegister({ onSuccess, showToast }) {
   const [form, setForm] = useState({
     email: "",
@@ -819,9 +1056,27 @@ function AuthRegister({ onSuccess, showToast }) {
     company_name: "",
     contact_name: "",
   });
+  const [fieldErrors, setFieldErrors] = useState({});
+
+  const setField = (key) => (e) => {
+    setForm({ ...form, [key]: e.target.value });
+    if (fieldErrors[key]) {
+      setFieldErrors((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
+  };
 
   const submit = async (e) => {
     e.preventDefault();
+    const errors = validateRegisterForm(form);
+    setFieldErrors(errors);
+    if (hasErrors(errors)) {
+      showToast(firstErrorMessage(errors), "error");
+      return;
+    }
     try {
       const data = await api("/auth/register", {
         method: "POST",
@@ -843,45 +1098,54 @@ function AuthRegister({ onSuccess, showToast }) {
   return (
     <div className="panel panel-deco auth-panel">
       <h2>Регистрация организации</h2>
-      <form onSubmit={submit} className="form-grid cols-2">
-        <div>
-          <label>Электронная почта</label>
+      <p className="muted panel-sub">После регистрации заявки сохраняются в личном кабинете.</p>
+      <form onSubmit={submit} className="form-grid cols-2" noValidate>
+        <FormField label="Электронная почта" htmlFor="reg-email" error={fieldErrors.email}>
           <input
+            id="reg-email"
             type="email"
             value={form.email}
-            onChange={(e) => setForm({ ...form, email: e.target.value })}
-            required
+            onChange={setField("email")}
+            className={fieldInputClass(fieldErrors.email)}
+            autoComplete="email"
           />
-        </div>
-        <div>
-          <label>Пароль</label>
+        </FormField>
+        <FormField label="Пароль" htmlFor="reg-pass" error={fieldErrors.password}>
           <input
+            id="reg-pass"
             type="password"
             value={form.password}
-            onChange={(e) => setForm({ ...form, password: e.target.value })}
-            required
-            minLength={4}
+            onChange={setField("password")}
+            className={fieldInputClass(fieldErrors.password)}
+            autoComplete="new-password"
           />
-        </div>
-        <div>
-          <label>ИНН</label>
-          <input value={form.inn} onChange={(e) => setForm({ ...form, inn: e.target.value })} required />
-        </div>
-        <div>
-          <label>Название организации</label>
+        </FormField>
+        <FormField label="ИНН" htmlFor="reg-inn" error={fieldErrors.inn}>
           <input
+            id="reg-inn"
+            value={form.inn}
+            onChange={setField("inn")}
+            placeholder="10 или 12 цифр"
+            className={fieldInputClass(fieldErrors.inn)}
+            inputMode="numeric"
+          />
+        </FormField>
+        <FormField label="Название организации" htmlFor="reg-company" error={fieldErrors.company_name}>
+          <input
+            id="reg-company"
             value={form.company_name}
-            onChange={(e) => setForm({ ...form, company_name: e.target.value })}
-            required
+            onChange={setField("company_name")}
+            className={fieldInputClass(fieldErrors.company_name)}
           />
-        </div>
-        <div style={{ gridColumn: "1 / -1" }}>
-          <label>Контактное лицо</label>
-          <input
-            value={form.contact_name}
-            onChange={(e) => setForm({ ...form, contact_name: e.target.value })}
-          />
-        </div>
+        </FormField>
+        <FormField
+          label="Контактное лицо"
+          htmlFor="reg-contact"
+          error={fieldErrors.contact_name}
+          className="span-2"
+        >
+          <input id="reg-contact" value={form.contact_name} onChange={setField("contact_name")} />
+        </FormField>
         <button type="submit" className="btn btn-solid" style={{ gridColumn: "1 / -1", justifySelf: "start" }}>
           Зарегистрироваться
         </button>
@@ -889,44 +1153,42 @@ function AuthRegister({ onSuccess, showToast }) {
     </div>
   );
 }
-
 function Wizard({ onDone, showToast }) {
   const [step, setStep] = useState(1);
   const [form, setForm] = useState(() => formFromPrefill(readPrefill()));
   const [err, setErr] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({});
   const [uploadHint, setUploadHint] = useState("");
 
-  const f = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const f = (k) => (e) => {
+    setForm({ ...form, [k]: e.target.value });
+    if (fieldErrors[k]) {
+      setFieldErrors((prev) => {
+        const next = { ...prev };
+        delete next[k];
+        return next;
+      });
+    }
+  };
 
   const next = () => {
+    const errors = validateLoanWizardStep(step, form);
+    setFieldErrors(errors);
+    if (hasErrors(errors)) {
+      setErr(firstErrorMessage(errors));
+      return;
+    }
     setErr("");
-    if (step === 1) {
-      const d = form.inn.replace(/\D/g, "");
-      if (d.length !== 10 && d.length !== 12) {
-        setErr("ИНН: 10 или 12 цифр");
-        return;
-      }
-      if (form.company_name.trim().length < 2) {
-        setErr("Укажите наименование организации");
-        return;
-      }
-    }
-    if (step === 2) {
-      if (form.address.trim().length < 5 || !parseInt(form.area, 10)) {
-        setErr("Укажите адрес и площадь");
-        return;
-      }
-    }
-    if (step === 3) {
-      if (!parseFloat(form.requested_amount)) {
-        setErr("Укажите сумму займа");
-        return;
-      }
-    }
     if (step < 4) setStep(step + 1);
   };
 
   const submit = async () => {
+    const errors = validateLoanForm(form);
+    setFieldErrors(errors);
+    if (hasErrors(errors)) {
+      setErr(firstErrorMessage(errors));
+      return;
+    }
     setErr("");
     try {
       const body = buildLoanBody(form);
@@ -986,11 +1248,13 @@ function Wizard({ onDone, showToast }) {
         <div className="form-grid cols-2">
           <div>
             <label>ИНН</label>
-            <input value={form.inn} onChange={f("inn")} required />
+            <input value={form.inn} onChange={f("inn")} className={fieldInputClass(fieldErrors.inn)} />
+            {fieldErrors.inn && <p className="field-error">{fieldErrors.inn}</p>}
           </div>
           <div>
             <label>Организация</label>
-            <input value={form.company_name} onChange={f("company_name")} required />
+            <input value={form.company_name} onChange={f("company_name")} className={fieldInputClass(fieldErrors.company_name)} />
+            {fieldErrors.company_name && <p className="field-error">{fieldErrors.company_name}</p>}
           </div>
           <div style={{ gridColumn: "1 / -1" }}>
             <label>Контактное лицо</label>
@@ -1003,11 +1267,13 @@ function Wizard({ onDone, showToast }) {
         <div className="form-grid cols-2">
           <div style={{ gridColumn: "1 / -1" }}>
             <label>Адрес объекта</label>
-            <input value={form.address} onChange={f("address")} required />
+            <input value={form.address} onChange={f("address")} className={fieldInputClass(fieldErrors.address)} />
+            {fieldErrors.address && <p className="field-error">{fieldErrors.address}</p>}
           </div>
           <div>
             <label>Площадь, м²</label>
-            <input type="number" min={1} value={form.area} onChange={f("area")} required />
+            <input type="number" min={1} max={500000} value={form.area} onChange={f("area")} className={fieldInputClass(fieldErrors.area)} />
+            {fieldErrors.area && <p className="field-error">{fieldErrors.area}</p>}
           </div>
           <div>
             <label>Тип</label>
@@ -1021,11 +1287,13 @@ function Wizard({ onDone, showToast }) {
           </div>
           <div>
             <label>Кадастровый номер</label>
-            <input value={form.cadastral_number} onChange={f("cadastral_number")} />
+            <input value={form.cadastral_number} onChange={f("cadastral_number")} className={fieldInputClass(fieldErrors.cadastral_number)} />
+            {fieldErrors.cadastral_number && <p className="field-error">{fieldErrors.cadastral_number}</p>}
           </div>
           <div>
             <label>Год постройки</label>
-            <input type="number" value={form.year_built} onChange={f("year_built")} />
+            <input type="number" min={1800} max={2030} value={form.year_built} onChange={f("year_built")} className={fieldInputClass(fieldErrors.year_built)} />
+            {fieldErrors.year_built && <p className="field-error">{fieldErrors.year_built}</p>}
           </div>
         </div>
       )}
@@ -1034,19 +1302,23 @@ function Wizard({ onDone, showToast }) {
         <div className="form-grid cols-2">
           <div>
             <label>Сумма займа, ₽</label>
-            <input type="number" min={1} step="1000" value={form.requested_amount} onChange={f("requested_amount")} required />
+            <input type="number" min={1} step="1000" value={form.requested_amount} onChange={f("requested_amount")} className={fieldInputClass(fieldErrors.requested_amount)} />
+            {fieldErrors.requested_amount && <p className="field-error">{fieldErrors.requested_amount}</p>}
           </div>
           <div>
             <label>Срок, мес.</label>
-            <input type="number" min={1} max={360} value={form.term_months} onChange={f("term_months")} />
+            <input type="number" min={1} max={360} value={form.term_months} onChange={f("term_months")} className={fieldInputClass(fieldErrors.term_months)} />
+            {fieldErrors.term_months && <p className="field-error">{fieldErrors.term_months}</p>}
           </div>
           <div>
             <label>Выручка в год, ₽</label>
-            <input type="number" min={0} value={form.annual_revenue} onChange={f("annual_revenue")} />
+            <input type="number" min={0} value={form.annual_revenue} onChange={f("annual_revenue")} className={fieldInputClass(fieldErrors.annual_revenue)} />
+            {fieldErrors.annual_revenue && <p className="field-error">{fieldErrors.annual_revenue}</p>}
           </div>
           <div>
             <label>Долги, ₽</label>
-            <input type="number" min={0} value={form.total_debt} onChange={f("total_debt")} />
+            <input type="number" min={0} value={form.total_debt} onChange={f("total_debt")} className={fieldInputClass(fieldErrors.total_debt)} />
+            {fieldErrors.total_debt && <p className="field-error">{fieldErrors.total_debt}</p>}
           </div>
         </div>
       )}
@@ -1118,12 +1390,20 @@ function DropZone({ onFile }) {
   );
 }
 
-function Cabinet({ setView }) {
+function Cabinet({ setView, focus, onFocusConsumed }) {
   const [rows, setRows] = useState(null);
   const [err, setErr] = useState("");
   const [detailId, setDetailId] = useState(null);
+  const [detailMode, setDetailMode] = useState("full");
   const [detail, setDetail] = useState(null);
   const token = getToken();
+
+  useEffect(() => {
+    if (!focus?.applicationId) return;
+    setDetailId(focus.applicationId);
+    setDetailMode(focus.chatOnly ? "chat" : "full");
+    onFocusConsumed?.();
+  }, [focus, onFocusConsumed]);
 
   const load = useCallback(async () => {
     if (!token) {
@@ -1177,7 +1457,9 @@ function Cabinet({ setView }) {
   return (
     <div className="panel wide">
       <h2>Мои заявки</h2>
-      <p className="muted">При смене статуса сотрудником компании сюда приходит обновление; ниже — история изменений по каждой заявке.</p>
+      <p className="muted">
+        При ответе сотрудника по заявке появляется уведомление — откройте переписку кнопкой «Сообщения».
+      </p>
       {err && <div className="alert alert-error">{err}</div>}
       {!rows?.length && !err && <p className="muted">Пока нет заявок.</p>}
       {!!rows?.length && (
@@ -1190,20 +1472,43 @@ function Cabinet({ setView }) {
                 <th>Сумма</th>
                 <th>Статус</th>
                 <th>Оценка залога</th>
-                <th />
+                <th>Действия</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.id}>
-                  <td>{r.id}</td>
+                <tr
+                  key={r.id}
+                  className={`${r.unread_replies > 0 ? "row-has-reply" : ""}${detailId === r.id ? " row-selected" : ""}`}
+                >
+                  <td>
+                    {r.id}
+                    {r.unread_replies > 0 ? <span className="row-reply-dot" title="Новый ответ" /> : null}
+                  </td>
                   <td>{r.company_name}</td>
                   <td>{r.requested_amount?.toLocaleString("ru-RU")}</td>
                   <td>{r.status}</td>
                   <td>{r.ai_valuation?.toLocaleString("ru-RU") ?? "—"}</td>
-                  <td>
-                    <button type="button" className="btn btn-outline" onClick={() => setDetailId(r.id)}>
-                      История
+                  <td className="cell-actions">
+                    <button
+                      type="button"
+                      className="btn btn-outline"
+                      onClick={() => {
+                        setDetailMode("full");
+                        setDetailId(r.id);
+                      }}
+                    >
+                      Открыть
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn btn-solid${r.unread_replies > 0 ? " btn-attention" : ""}`}
+                      onClick={() => {
+                        setDetailMode("chat");
+                        setDetailId(r.id);
+                      }}
+                    >
+                      Сообщения{r.unread_replies > 0 ? ` (${r.unread_replies})` : ""}
                     </button>
                   </td>
                 </tr>
@@ -1213,19 +1518,38 @@ function Cabinet({ setView }) {
         </div>
       )}
 
-      {detailId && detail && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" onClick={() => setDetailId(null)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <button type="button" className="modal-close" aria-label="Закрыть" onClick={() => setDetailId(null)}>
-              ×
-            </button>
-            <h3>Заявка №{detail.id}</h3>
-            <p className="muted">Текущий статус: {detail.status}</p>
-            <h4 style={{ margin: "1rem 0 0.5rem", fontSize: "0.95rem", color: "var(--primary)" }}>История статусов</h4>
+      <InlineDetailPanel
+        id={detailId}
+        title={detail ? `Заявка №${detail.id}` : detailId ? `Заявка №${detailId}` : ""}
+        onClose={() => setDetailId(null)}
+        tabs={
+          detail ? (
+            <DetailTabs
+              mode={detailMode}
+              onChange={setDetailMode}
+              items={[
+                { id: "full", label: "Данные" },
+                { id: "chat", label: "Сообщения" },
+              ]}
+            />
+          ) : null
+        }
+      >
+        {!detail ? (
+          <p className="muted">Загрузка…</p>
+        ) : detailMode === "chat" ? (
+          <>
+            <p className="muted">Переписка со специалистом. Ответы также в «Уведомления».</p>
+            <ApplicationChat applicationId={detail.id} onRead={load} />
+          </>
+        ) : (
+          <>
+            <p className="muted">
+              Статус: <strong>{detail.status}</strong>
+            </p>
+            <h4 className="detail-subheading">История статусов</h4>
             <div className="timeline">
-              {(detail.status_history || []).length === 0 && (
-                <p className="muted">Пока только создание заявки.</p>
-              )}
+              {(detail.status_history || []).length === 0 && <p className="muted">Пока только создание заявки.</p>}
               {(detail.status_history || []).map((h) => (
                 <div key={h.id} className="timeline-item">
                   <time>{formatDt(h.created_at)}</time>
@@ -1240,9 +1564,10 @@ function Cabinet({ setView }) {
                 </div>
               ))}
             </div>
-          </div>
-        </div>
-      )}
+            <ApplicationChat applicationId={detail.id} onRead={load} />
+          </>
+        )}
+      </InlineDetailPanel>
     </div>
   );
 }
@@ -1257,7 +1582,354 @@ function formatDt(iso) {
   }
 }
 
-function AdminPanel() {
+function InlineDetailPanel({ id, title, onClose, tabs, children }) {
+  const panelRef = useRef(null);
+
+  useEffect(() => {
+    if (!id) return;
+    const t = window.setTimeout(() => {
+      panelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [id]);
+
+  if (!id) return null;
+
+  const titleId = `detail-panel-title-${id}`;
+
+  return (
+    <section ref={panelRef} className="detail-panel" id={`app-detail-${id}`} aria-labelledby={titleId}>
+      <div className="detail-panel-header">
+        <h3 id={titleId}>{title}</h3>
+        <div className="detail-panel-toolbar">
+          {tabs}
+          <button type="button" className="btn btn-outline" onClick={onClose}>
+            Свернуть
+          </button>
+        </div>
+      </div>
+      <div className="detail-panel-body">{children}</div>
+    </section>
+  );
+}
+
+function DetailTabs({ mode, onChange, items }) {
+  return (
+    <div className="detail-tabs" role="tablist">
+      {items.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          role="tab"
+          aria-selected={mode === item.id}
+          className={`detail-tab${mode === item.id ? " is-active" : ""}`}
+          onClick={() => onChange(item.id)}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ApplicationChat({ applicationId, onRead }) {
+  const [messages, setMessages] = useState([]);
+  const [canReply, setCanReply] = useState(false);
+  const [text, setText] = useState("");
+  const [err, setErr] = useState("");
+  const [sending, setSending] = useState(false);
+  const listRef = useRef(null);
+  const myRole = getRole();
+
+  const load = useCallback(async () => {
+    if (!applicationId) return;
+    try {
+      const data = await api(`/applications/${applicationId}/messages`);
+      setMessages(data.items || []);
+      setCanReply(!!data.can_reply);
+      setErr("");
+      onRead?.();
+    } catch (e) {
+      setErr(e.message);
+    }
+  }, [applicationId, onRead]);
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, 3000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages]);
+
+  const send = async (e) => {
+    e.preventDefault();
+    const body = text.trim();
+    if (!body || sending) return;
+    setSending(true);
+    setErr("");
+    try {
+      await api(`/applications/${applicationId}/messages`, {
+        method: "POST",
+        body: { body },
+      });
+      setText("");
+      await load();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const senderLabel = (m) => (m.author_role === "admin" ? "Сотрудник" : "Клиент");
+  const isAdmin = myRole === "admin";
+
+  let chatHint = "Обновление каждые 3 с.";
+  if (isAdmin) {
+    chatHint = "Сообщение увидит клиент в личном кабинете и в уведомлениях. " + chatHint;
+  } else if (canReply) {
+    chatHint = "Вы можете ответить сотруднику компании. " + chatHint;
+  } else {
+    chatHint = "Ответить можно после первого сообщения сотрудника по этой заявке.";
+  }
+
+  return (
+    <div className="chat-panel">
+      <h4 className="chat-title">Переписка по заявке</h4>
+      <p className="muted chat-hint">{chatHint}</p>
+      {err ? <div className="alert alert-error">{err}</div> : null}
+      <div className="chat-messages" ref={listRef} role="log" aria-live="polite">
+        {messages.length === 0 ? (
+          <p className="muted chat-empty">
+            {isAdmin ? "Пока нет сообщений. Напишите клиенту." : "Пока нет сообщений от сотрудника."}
+          </p>
+        ) : null}
+        {messages.map((m) => {
+          const mine = m.author_role === myRole;
+          return (
+            <div key={m.id} className={`chat-bubble ${mine ? "chat-bubble-mine" : "chat-bubble-other"}`}>
+              <div className="chat-meta">
+                {senderLabel(m)}
+                {m.author_email ? ` · ${m.author_email}` : ""} · {formatDt(m.created_at)}
+              </div>
+              <div className="chat-body">{m.body}</div>
+            </div>
+          );
+        })}
+      </div>
+      {canReply ? (
+        <form className="chat-compose" onSubmit={send}>
+          <textarea
+            rows={2}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={isAdmin ? "Сообщение клиенту…" : "Ваш ответ сотруднику…"}
+            maxLength={4000}
+          />
+          <button type="submit" className="btn btn-solid" disabled={!text.trim() || sending}>
+            {sending ? "Отправка…" : "Отправить"}
+          </button>
+        </form>
+      ) : null}
+    </div>
+  );
+}
+
+function formatRub(value) {
+  if (value == null || Number.isNaN(Number(value))) return "—";
+  return `${Number(value).toLocaleString("ru-RU")} ₽`;
+}
+
+function AdminAnalytics() {
+  const [summary, setSummary] = useState(null);
+  const [err, setErr] = useState("");
+  const [pdfErr, setPdfErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [filters, setFilters] = useState({
+    date_from: "",
+    date_to: "",
+    inn: "",
+    amount_min: "",
+    amount_max: "",
+  });
+  const [applied, setApplied] = useState({});
+
+  const load = useCallback(async () => {
+    setErr("");
+    setLoading(true);
+    try {
+      const q = buildQuery({
+        date_from: applied.date_from || undefined,
+        date_to: applied.date_to || undefined,
+        inn: applied.inn || undefined,
+        amount_min: applied.amount_min || undefined,
+        amount_max: applied.amount_max || undefined,
+      });
+      const data = await api(`/analytics/summary${q}`);
+      setSummary(data);
+    } catch (e) {
+      setSummary(null);
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [applied]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const applyFilters = (e) => {
+    e?.preventDefault();
+    setApplied({ ...filters });
+  };
+
+  const resetFilters = () => {
+    const empty = { date_from: "", date_to: "", inn: "", amount_min: "", amount_max: "" };
+    setFilters(empty);
+    setApplied(empty);
+  };
+
+  const doPdf = async () => {
+    setPdfErr("");
+    try {
+      await downloadAnalyticsReport({
+        date_from: applied.date_from || undefined,
+        date_to: applied.date_to || undefined,
+        inn: applied.inn || undefined,
+        amount_min: applied.amount_min || undefined,
+        amount_max: applied.amount_max || undefined,
+      });
+    } catch (e) {
+      setPdfErr(e.message);
+    }
+  };
+
+  const periodLabel = () => {
+    const p = summary?.period;
+    if (!p) return "за весь период";
+    if (p.date_from && p.date_to) return `с ${p.date_from} по ${p.date_to}`;
+    if (p.date_from) return `с ${p.date_from}`;
+    if (p.date_to) return `по ${p.date_to}`;
+    return "за весь период";
+  };
+
+  return (
+    <div className="panel wide">
+      <h2>Аналитика по заявкам</h2>
+      <p className="muted">
+        Средние суммы займов в разрезе одобренных, отказанных и находящихся на рассмотрении. Отчёт можно выгрузить в PDF.
+      </p>
+
+      <form className="admin-filters" onSubmit={applyFilters}>
+        <div>
+          <label>С даты</label>
+          <input type="date" value={filters.date_from} onChange={(e) => setFilters({ ...filters, date_from: e.target.value })} />
+        </div>
+        <div>
+          <label>По дату</label>
+          <input type="date" value={filters.date_to} onChange={(e) => setFilters({ ...filters, date_to: e.target.value })} />
+        </div>
+        <div>
+          <label>ИНН (фрагмент)</label>
+          <input value={filters.inn} onChange={(e) => setFilters({ ...filters, inn: e.target.value })} placeholder="5609…" />
+        </div>
+        <div>
+          <label>Сумма от</label>
+          <input type="number" value={filters.amount_min} onChange={(e) => setFilters({ ...filters, amount_min: e.target.value })} />
+        </div>
+        <div>
+          <label>Сумма до</label>
+          <input type="number" value={filters.amount_max} onChange={(e) => setFilters({ ...filters, amount_max: e.target.value })} />
+        </div>
+        <div className="full" style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+          <button type="submit" className="btn btn-solid" disabled={loading}>
+            {loading ? "Считаем…" : "Обновить"}
+          </button>
+          <button type="button" className="btn btn-outline" onClick={resetFilters}>
+            Сбросить
+          </button>
+          <button type="button" className="btn btn-primary" onClick={doPdf} disabled={loading || !summary}>
+            Скачать PDF-отчёт
+          </button>
+        </div>
+      </form>
+
+      {err && <div className="alert alert-error">{err}</div>}
+      {pdfErr && <div className="alert alert-error">{pdfErr}</div>}
+
+      {summary && (
+        <>
+          <p className="muted analytics-period">
+            Период: {periodLabel()} · всего заявок: {summary.total_applications} · средняя по всем:{" "}
+            {formatRub(summary.overall?.avg_amount)}
+          </p>
+
+          <div className="analytics-cards">
+            {(summary.buckets || []).map((b) => (
+              <div key={b.key} className={`analytics-card analytics-card-${b.key}`}>
+                <div className="analytics-card-label">{b.label}</div>
+                <div className="analytics-card-count">{b.count} заявок</div>
+                <div className="analytics-card-avg">{formatRub(b.avg_amount)}</div>
+                <div className="analytics-card-meta muted">
+                  сумма портфеля: {formatRub(b.total_amount)}
+                  {b.min_amount != null ? (
+                    <>
+                      <br />
+                      мин / макс: {formatRub(b.min_amount)} / {formatRub(b.max_amount)}
+                    </>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <h3 className="analytics-subtitle">По каждому статусу</h3>
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Статус</th>
+                  <th>Кол-во</th>
+                  <th>Средняя сумма</th>
+                  <th>Мин</th>
+                  <th>Макс</th>
+                  <th>Сумма</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(summary.by_status || []).length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="muted">
+                      Нет данных за выбранный период
+                    </td>
+                  </tr>
+                ) : (
+                  (summary.by_status || []).map((r) => (
+                    <tr key={r.status}>
+                      <td>{r.status}</td>
+                      <td>{r.count}</td>
+                      <td>{formatRub(r.avg_amount)}</td>
+                      <td>{formatRub(r.min_amount)}</td>
+                      <td>{formatRub(r.max_amount)}</td>
+                      <td>{formatRub(r.total_amount)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AdminPanel({ focus, onFocusConsumed }) {
   const [rows, setRows] = useState([]);
   const [err, setErr] = useState("");
   const [filters, setFilters] = useState({
@@ -1270,9 +1942,17 @@ function AdminPanel() {
   });
   const [applied, setApplied] = useState({});
   const [detailId, setDetailId] = useState(null);
+  const [detailMode, setDetailMode] = useState("full");
   const [detail, setDetail] = useState(null);
   const [noteText, setNoteText] = useState("");
   const [exportErr, setExportErr] = useState("");
+
+  useEffect(() => {
+    if (!focus?.applicationId) return;
+    setDetailId(focus.applicationId);
+    setDetailMode(focus.chatOnly ? "reply" : "full");
+    onFocusConsumed?.();
+  }, [focus, onFocusConsumed]);
 
   const load = useCallback(async () => {
     setErr("");
@@ -1300,6 +1980,7 @@ function AdminPanel() {
     if (!detailId) {
       setDetail(null);
       setNoteText("");
+      setDetailMode("full");
       return;
     }
     let cancelled = false;
@@ -1444,13 +2125,19 @@ function AdminPanel() {
               <th>Сумма</th>
               <th>Риск</th>
               <th>Статус</th>
-              <th>Карточка</th>
+              <th>Действия</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.id}>
-                <td>{r.id}</td>
+              <tr
+                key={r.id}
+                className={`${r.unread_replies > 0 ? "row-has-reply" : ""}${detailId === r.id ? " row-selected" : ""}`}
+              >
+                <td>
+                  {r.id}
+                  {r.unread_replies > 0 ? <span className="row-reply-dot" title="Новый ответ клиента" /> : null}
+                </td>
                 <td>{r.inn}</td>
                 <td>{r.company_name}</td>
                 <td>{r.requested_amount?.toLocaleString("ru-RU")}</td>
@@ -1468,9 +2155,26 @@ function AdminPanel() {
                     ))}
                   </select>
                 </td>
-                <td>
-                  <button type="button" className="btn btn-outline" onClick={() => setDetailId(r.id)}>
+                <td className="cell-actions">
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    onClick={() => {
+                      setDetailMode("full");
+                      setDetailId(r.id);
+                    }}
+                  >
                     Открыть
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-solid${r.unread_replies > 0 ? " btn-attention" : ""}`}
+                    onClick={() => {
+                      setDetailMode("reply");
+                      setDetailId(r.id);
+                    }}
+                  >
+                    Ответить{r.unread_replies > 0 ? ` (${r.unread_replies})` : ""}
                   </button>
                 </td>
               </tr>
@@ -1479,14 +2183,48 @@ function AdminPanel() {
         </table>
       </div>
 
-      {detailId && detail && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" onClick={() => setDetailId(null)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <button type="button" className="modal-close" aria-label="Закрыть" onClick={() => setDetailId(null)}>
-              ×
-            </button>
-            <h3>Заявка №{detail.id}</h3>
-            <dl className="about-dl" style={{ marginTop: "0.75rem" }}>
+      <InlineDetailPanel
+        id={detailId}
+        title={
+          detail
+            ? detailMode === "reply"
+              ? `Ответ клиенту — заявка №${detail.id}`
+              : `Заявка №${detail.id}`
+            : detailId
+              ? `Заявка №${detailId}`
+              : ""
+        }
+        onClose={() => setDetailId(null)}
+        tabs={
+          detail ? (
+            <DetailTabs
+              mode={detailMode}
+              onChange={setDetailMode}
+              items={[
+                { id: "full", label: "Данные" },
+                { id: "reply", label: "Переписка" },
+              ]}
+            />
+          ) : null
+        }
+      >
+        {!detail ? (
+          <p className="muted">Загрузка…</p>
+        ) : detailMode === "reply" ? (
+          <>
+            <p className="muted">
+              Клиент: {detail.client_email || "не привязан к ЛК"} · {detail.company_name}
+            </p>
+            {!detail.client_email && !detail.user_id ? (
+              <div className="alert alert-error">
+                Заявка без учётной записи клиента — уведомление в ЛК не дойдёт.
+              </div>
+            ) : null}
+            <ApplicationChat applicationId={detail.id} onRead={load} />
+          </>
+        ) : (
+          <>
+            <dl className="about-dl detail-dl">
               <dt>Клиент (email)</dt>
               <dd>{detail.client_email || "—"}</dd>
               <dt>ИНН / компания</dt>
@@ -1526,7 +2264,7 @@ function AdminPanel() {
               <dd>{formatDt(detail.created_at)}</dd>
             </dl>
 
-            <h4 style={{ margin: "1.25rem 0 0.5rem", fontSize: "0.95rem", color: "var(--primary)" }}>История статусов</h4>
+            <h4 className="detail-subheading">История статусов</h4>
             <div className="timeline">
               {(detail.status_history || []).map((h) => (
                 <div key={h.id} className="timeline-item">
@@ -1542,7 +2280,7 @@ function AdminPanel() {
               ))}
             </div>
 
-            <h4 style={{ margin: "1.25rem 0 0.5rem", fontSize: "0.95rem", color: "var(--primary)" }}>Внутренние заметки</h4>
+            <h4 className="detail-subheading">Внутренние заметки</h4>
             {(detail.notes || []).map((n) => (
               <div key={n.id} className="note-item">
                 <div className="muted">{formatDt(n.created_at)} {n.author_email ? `· ${n.author_email}` : ""}</div>
@@ -1558,9 +2296,11 @@ function AdminPanel() {
                 Сохранить заметку
               </button>
             </form>
-          </div>
-        </div>
-      )}
+
+            <ApplicationChat applicationId={detail.id} onRead={load} />
+          </>
+        )}
+      </InlineDetailPanel>
     </div>
   );
 }

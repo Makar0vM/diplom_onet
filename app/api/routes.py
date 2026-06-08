@@ -11,10 +11,18 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_current_user_optional, require_admin
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.database import get_db
-from app.db.models import ApplicationNote, ApplicationStatusHistory, LoanApplication, User
+from app.db.models import (
+    ApplicationMessage,
+    ApplicationNote,
+    ApplicationStatusHistory,
+    LoanApplication,
+    User,
+    UserNotification,
+)
 from app.schemas.schemas import (
     GrifindLoanRequest,
     LoginRequest,
+    MessageCreate,
     NoteCreate,
     PredictRequest,
     RegisterRequest,
@@ -23,12 +31,21 @@ from app.schemas.schemas import (
 from app.services.calculator import annuity_payment
 from app.services.loan_mapper import (
     assemble_preview,
-    loan_to_predict_request,
+    loan_to_ml_features,
     validate_cadastral,
     validate_inn,
 )
 from app.services.ml_service import predict
 from app.services.notifications import log_status_change_stub
+from app.services.user_notifications import (
+    count_unread,
+    count_unread_for_application,
+    create_admin_reply_notification,
+    create_client_reply_notifications_for_admins,
+    mark_application_notifications_read,
+)
+from app.services.analytics import build_analytics_summary, fetch_applications_for_analytics
+from app.services.analytics_pdf import build_analytics_pdf
 from app.services.ocr_service import extract_text
 
 router = APIRouter()
@@ -40,6 +57,8 @@ def _validate_loan_request_input(body: GrifindLoanRequest) -> str:
         raise HTTPException(status_code=422, detail="Некорректный ИНН")
     if not validate_cadastral(body.cadastral_number):
         raise HTTPException(status_code=422, detail="Некорректный формат кадастрового номера")
+    if body.area < 1 or body.area > 20_000:
+        raise HTTPException(status_code=422, detail="Площадь объекта: от 1 до 20 000 м²")
     return inn_clean
 
 
@@ -97,8 +116,8 @@ def _ensure_application_access(db: Session, application_id: int, user: User) -> 
     return row
 
 
-def _serialize_application_list_row(r: LoanApplication) -> dict:
-    return {
+def _serialize_application_list_row(db: Session, r: LoanApplication, user: User) -> dict:
+    out = {
         "id": r.id,
         "inn": r.inn,
         "company_name": r.company_name,
@@ -109,6 +128,8 @@ def _serialize_application_list_row(r: LoanApplication) -> dict:
         "ai_risk_score": r.ai_risk_score,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
+    out["unread_replies"] = count_unread_for_application(db, user.id, r.id)
+    return out
 
 
 def _serialize_application_detail(db: Session, r: LoanApplication, include_notes: bool) -> dict:
@@ -164,6 +185,54 @@ def _serialize_application_detail(db: Session, r: LoanApplication, include_notes
     return out
 
 
+def _admin_has_replied(db: Session, application_id: int) -> bool:
+    return (
+        db.query(ApplicationMessage)
+        .join(User, ApplicationMessage.author_id == User.id)
+        .filter(
+            ApplicationMessage.application_id == application_id,
+            User.role == "admin",
+        )
+        .first()
+        is not None
+    )
+
+
+def _user_can_reply_to_chat(db: Session, application_id: int, user: User) -> bool:
+    if user.role == "admin":
+        return True
+    return _admin_has_replied(db, application_id)
+
+
+def _serialize_messages(db: Session, application_id: int) -> List[dict]:
+    rows = (
+        db.query(ApplicationMessage)
+        .filter(ApplicationMessage.application_id == application_id)
+        .order_by(ApplicationMessage.created_at.asc())
+        .all()
+    )
+    items = []
+    for m in rows:
+        author_email = None
+        author_role = None
+        if m.author_id:
+            au = db.query(User).filter(User.id == m.author_id).first()
+            if au:
+                author_email = au.email
+                author_role = au.role
+        items.append(
+            {
+                "id": m.id,
+                "body": m.body,
+                "author_id": m.author_id,
+                "author_email": author_email,
+                "author_role": author_role,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+        )
+    return items
+
+
 def _serialize_history(db: Session, application_id: int) -> List[dict]:
     rows = (
         db.query(ApplicationStatusHistory)
@@ -193,7 +262,9 @@ def _serialize_history(db: Session, application_id: int) -> List[dict]:
 @router.post("/predict")
 def predict_endpoint(data: PredictRequest):
     try:
-        return predict(data)
+        from app.services.ml_service import predict_legacy_german
+
+        return predict_legacy_german(data)
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
 
@@ -230,10 +301,10 @@ async def upload(file: UploadFile):
 @router.post("/auth/register")
 def register(body: RegisterRequest, db: Annotated[Session, Depends(get_db)]):
     if db.query(User).filter(User.email == body.email.strip().lower()).first():
-        raise HTTPException(status_code=400, detail="Email already registered")
+        raise HTTPException(status_code=400, detail="Этот email уже зарегистрирован")
     inn_clean = body.inn.replace(" ", "")
     if not validate_inn(inn_clean):
-        raise HTTPException(status_code=422, detail="ИНН должен содержать 10 или 12 цифр")
+        raise HTTPException(status_code=422, detail="Некорректный ИНН (проверьте цифры и контрольную сумму)")
     user = User(
         email=body.email.strip().lower(),
         password_hash=hash_password(body.password),
@@ -253,7 +324,7 @@ def register(body: RegisterRequest, db: Annotated[Session, Depends(get_db)]):
 def login(body: LoginRequest, db: Annotated[Session, Depends(get_db)]):
     user = db.query(User).filter(User.email == body.email.strip().lower()).first()
     if not user or not verify_password(body.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Неверный email или пароль")
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
     token = create_access_token({"sub": str(user.id), "role": user.role})
     return {"access_token": token, "token_type": "bearer", "role": user.role}
 
@@ -274,7 +345,7 @@ def me(user: Annotated[User, Depends(get_current_user)]):
 def loan_preview(body: GrifindLoanRequest):
     _validate_loan_request_input(body)
     try:
-        ml = predict(loan_to_predict_request(body))
+        ml = predict(loan_to_ml_features(body))
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     preview = assemble_preview(body, ml)
@@ -294,7 +365,7 @@ def create_application(
 ):
     inn_clean = _validate_loan_request_input(body)
     try:
-        ml = predict(loan_to_predict_request(body))
+        ml = predict(loan_to_ml_features(body))
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     preview = assemble_preview(body, ml)
@@ -355,7 +426,7 @@ def list_applications(
 ):
     q = _filtered_applications_query(db, user, status, date_from, date_to, inn, amount_min, amount_max)
     rows: List[LoanApplication] = q.order_by(LoanApplication.created_at.desc()).limit(500).all()
-    return [_serialize_application_list_row(r) for r in rows]
+    return [_serialize_application_list_row(db, r, user) for r in rows]
 
 
 @router.get("/applications/export")
@@ -452,6 +523,125 @@ def get_application_history(
     return {"items": _serialize_history(db, application_id)}
 
 
+@router.get("/notifications/unread-count")
+def notifications_unread_count(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    return {"count": count_unread(db, user.id)}
+
+
+@router.get("/notifications")
+def list_notifications(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    rows = (
+        db.query(UserNotification)
+        .filter(UserNotification.user_id == user.id)
+        .order_by(UserNotification.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "id": n.id,
+                "application_id": n.application_id,
+                "title": n.title,
+                "body": n.body,
+                "is_read": n.is_read,
+                "created_at": n.created_at.isoformat() if n.created_at else None,
+            }
+            for n in rows
+        ]
+    }
+
+
+@router.post("/notifications/{notification_id}/read")
+def mark_notification_read(
+    notification_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    row = (
+        db.query(UserNotification)
+        .filter(UserNotification.id == notification_id, UserNotification.user_id == user.id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Уведомление не найдено")
+    row.is_read = True
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/applications/{application_id}/messages")
+def list_application_messages(
+    application_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    _ensure_application_access(db, application_id, user)
+    mark_application_notifications_read(db, user.id, application_id)
+    db.commit()
+    can_reply = _user_can_reply_to_chat(db, application_id, user)
+    return {
+        "items": _serialize_messages(db, application_id),
+        "can_reply": can_reply,
+    }
+
+
+@router.post("/applications/{application_id}/messages")
+def add_application_message(
+    application_id: int,
+    body: MessageCreate,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    row = _ensure_application_access(db, application_id, user)
+    if not _user_can_reply_to_chat(db, application_id, user):
+        raise HTTPException(
+            status_code=403,
+            detail="Ответить можно только после сообщения сотрудника компании",
+        )
+    text = body.body.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Текст сообщения не может быть пустым")
+    msg = ApplicationMessage(
+        application_id=row.id,
+        author_id=user.id,
+        body=text,
+    )
+    db.add(msg)
+    db.flush()
+    if user.role == "admin" and row.user_id:
+        create_admin_reply_notification(
+            db,
+            user_id=row.user_id,
+            application_id=row.id,
+            message_id=msg.id,
+            message_body=text,
+        )
+    elif user.role != "admin":
+        create_client_reply_notifications_for_admins(
+            db,
+            application_id=row.id,
+            message_id=msg.id,
+            message_body=text,
+        )
+    db.commit()
+    db.refresh(msg)
+    return {
+        "id": msg.id,
+        "body": msg.body,
+        "author_id": msg.author_id,
+        "author_email": user.email,
+        "author_role": user.role,
+        "created_at": msg.created_at.isoformat() if msg.created_at else None,
+    }
+
+
 @router.post("/applications/{application_id}/notes")
 def add_application_note(
     application_id: int,
@@ -503,4 +693,60 @@ def update_status(
     log_status_change_stub(row.id, client_email, old, status.status)
     db.commit()
     return {"id": application_id, "status": row.status}
+
+
+def _analytics_rows(
+    db: Session,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    inn: Optional[str] = None,
+    amount_min: Optional[float] = None,
+    amount_max: Optional[float] = None,
+) -> List[LoanApplication]:
+    return fetch_applications_for_analytics(
+        db,
+        date_from=date_from,
+        date_to=date_to,
+        inn=inn,
+        amount_min=amount_min,
+        amount_max=amount_max,
+    )
+
+
+@router.get("/analytics/summary")
+def analytics_summary(
+    db: Annotated[Session, Depends(get_db)],
+    admin: Annotated[User, Depends(require_admin)],
+    date_from: Annotated[Optional[date], Query()] = None,
+    date_to: Annotated[Optional[date], Query()] = None,
+    inn: Annotated[Optional[str], Query()] = None,
+    amount_min: Annotated[Optional[float], Query()] = None,
+    amount_max: Annotated[Optional[float], Query()] = None,
+):
+    rows = _analytics_rows(db, date_from, date_to, inn, amount_min, amount_max)
+    return build_analytics_summary(rows, date_from=date_from, date_to=date_to)
+
+
+@router.get("/analytics/report.pdf")
+def analytics_report_pdf(
+    db: Annotated[Session, Depends(get_db)],
+    admin: Annotated[User, Depends(require_admin)],
+    date_from: Annotated[Optional[date], Query()] = None,
+    date_to: Annotated[Optional[date], Query()] = None,
+    inn: Annotated[Optional[str], Query()] = None,
+    amount_min: Annotated[Optional[float], Query()] = None,
+    amount_max: Annotated[Optional[float], Query()] = None,
+):
+    rows = _analytics_rows(db, date_from, date_to, inn, amount_min, amount_max)
+    summary = build_analytics_summary(rows, date_from=date_from, date_to=date_to)
+    try:
+        pdf_bytes = build_analytics_pdf(summary)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    stamp = datetime.utcnow().strftime("%Y%m%d")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="grifind_analytics_{stamp}.pdf"'},
+    )
 

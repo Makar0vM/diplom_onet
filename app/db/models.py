@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from .database import Base
@@ -19,6 +19,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     applications = relationship("LoanApplication", back_populates="user")
+    notifications = relationship("UserNotification", back_populates="user", foreign_keys="UserNotification.user_id")
 
 
 class LoanApplication(Base):
@@ -55,6 +56,11 @@ class LoanApplication(Base):
         back_populates="application",
         cascade="all, delete-orphan",
     )
+    messages = relationship(
+        "ApplicationMessage",
+        back_populates="application",
+        cascade="all, delete-orphan",
+    )
 
 
 class ApplicationNote(Base):
@@ -82,3 +88,31 @@ class ApplicationStatusHistory(Base):
 
     application = relationship("LoanApplication", back_populates="status_history")
     changed_by = relationship("User", foreign_keys=[changed_by_id])
+
+
+class ApplicationMessage(Base):
+    __tablename__ = "application_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    application_id = Column(Integer, ForeignKey("loan_applications.id"), nullable=False, index=True)
+    author_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    body = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    application = relationship("LoanApplication", back_populates="messages")
+    author = relationship("User", foreign_keys=[author_id])
+
+
+class UserNotification(Base):
+    __tablename__ = "user_notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    application_id = Column(Integer, ForeignKey("loan_applications.id"), nullable=False, index=True)
+    message_id = Column(Integer, ForeignKey("application_messages.id"), nullable=True)
+    title = Column(String(255), nullable=False)
+    body = Column(Text, nullable=False)
+    is_read = Column(Boolean, nullable=False, default=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    user = relationship("User", back_populates="notifications", foreign_keys=[user_id])

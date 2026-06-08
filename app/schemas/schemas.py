@@ -46,7 +46,10 @@ class GrifindLoanRequest(BaseModel):
 
 class LoanPreviewResponse(BaseModel):
     valuation_estimate: float
+    market_value_estimate: float | None = None
+    valuation_note: str | None = None
     default_probability: float
+    risk_level: str | None = None
     approved_hint: bool
     suggested_rate_annual: float
     liquidity_ok: bool
@@ -55,3 +58,7 @@ class LoanPreviewResponse(BaseModel):
 
 class NoteCreate(BaseModel):
     body: str = Field(..., min_length=1, max_length=8000)
+
+
+class MessageCreate(BaseModel):
+    body: str = Field(..., min_length=1, max_length=4000)

@@ -12,24 +12,45 @@ from app.db import models  # noqa: F401
 from app.db.database import Base, SessionLocal, engine
 from app.db.models import User
 
+ADMIN_EMAIL = "admin"
+ADMIN_PASSWORD = "admin"
+
+
+def _ensure_admin_user(db) -> None:
+    admin = db.query(User).filter(User.role == "admin").first()
+    if admin is None:
+        admin = db.query(User).filter(User.email == "admin@grifind-invest.ru").first()
+    pwd_hash = hash_password(ADMIN_PASSWORD)
+    if admin:
+        admin.email = ADMIN_EMAIL
+        admin.password_hash = pwd_hash
+        admin.role = "admin"
+        if not admin.company_name:
+            admin.company_name = 'ООО «Грифинд Инвест»'
+        if not admin.inn:
+            admin.inn = "5609205966"
+        if not admin.contact_name:
+            admin.contact_name = "Администратор"
+    else:
+        db.add(
+            User(
+                email=ADMIN_EMAIL,
+                password_hash=pwd_hash,
+                role="admin",
+                company_name='ООО «Грифинд Инвест»',
+                inn="5609205966",
+                contact_name="Администратор",
+            )
+        )
+    db.commit()
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        if not db.query(User).filter(User.email == "admin@grifind-invest.ru").first():
-            db.add(
-                User(
-                    email="admin@grifind-invest.ru",
-                    password_hash=hash_password("admin123"),
-                    role="admin",
-                    company_name='ООО «Грифинд Инвест»',
-                    inn="5609205966",
-                    contact_name="Администратор",
-                )
-            )
-            db.commit()
+        _ensure_admin_user(db)
     finally:
         db.close()
     yield

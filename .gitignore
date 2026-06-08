@@ -3,5 +3,16 @@ __pycache__/
 *.pyc
 .pytest_cache/
 test.db
+data/
+*.db
 frontend/node_modules/
 frontend/dist/
+
+# Диплом / черновики (не часть приложения)
+scripts/
+diploma_sections/
+out/
+docx_extract*.txt
+applications_export.csv
+update_appendices.py
+*.bat
